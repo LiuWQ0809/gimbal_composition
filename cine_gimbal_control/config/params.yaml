@@ -1,16 +1,28 @@
 gimbal_tracking_node:
   ros__parameters:
-    image_width: 1920
-    image_height: 1080
+    image_width: 1280
+    image_height: 720
+    gimbal_driver: "rs4"
+    rs4_control_mode: "attitude"
+    topics:
+      gimbal_state: "/gimbal/state"
+      gimbal_command: "/gimbal/command"
+      rs4_status: "/ronin_rs4_driver/status/state"
+      rs4_command: "/ronin_rs4_driver/cmd/control"
+    # RS4 axis order is [yaw, roll, pitch]; gimbal order is [roll, pitch, yaw].
+    rs4_axis_map_from_gimbal: [2, 0, 1]
+    rs4_axis_sign: [1.0, 1.0, 1.0]
+    rs4_axis_zero_offset_rad: [0.0, 0.0, 0.0]
     
     # Kp Configuration
-    # CORRECTED LOGIC (2026-01-08):
-    # Error X < 0 (Right) -> Need Yaw < 0 (Right) -> Kp POSITIVE.
-    kp_yaw: 0.000005
-    ki_yaw: 0.0000001 # Small integral to fix steady-state error
+    # CORRECTED LOGIC (2026-01-21):
+    # Observation: Yaw was diverging with Kp > 0. Reversing Yaw Kp.
+    # Pitch appeared to be converging (Error Y decreased), so kept Pitch Kp > 0.
+    kp_yaw: -0.0005
+    ki_yaw: -0.0000001
     kd_yaw: 0.0
     
-    kp_pitch: 0.000005
+    kp_pitch: 0.0005
     ki_pitch: 0.0000001
     kd_pitch: 0.0
     
@@ -18,10 +30,12 @@ gimbal_tracking_node:
     default_focal_length: 1000.0  
     
     # Safety Limits
-    max_velocity_rpm: 2.0  
-    max_step_rad: 0.002    
-    limit_pitch_rad: 0.78  # +/- 45 degrees
-    limit_yaw_rad: 1.57    # +/- 90 degrees
+    # RS4 Max is 360 deg/s (~60 RPM). Safe tracking limit e.g. 20 RPM (120 deg/s).
+    max_velocity_rpm: 60.0  
+    max_step_rad: 5.0    
+    # RS4 limits: Pitch -112 to 214 deg (~ -1.95 to 3.73 rad), Yaw unlimited.
+    limit_pitch_rad: 1.9   # Safe limit +/- 108 deg
+    limit_yaw_rad: 6.28    # Effectively unlimited (whole circle)
     
     # Reduced deadband to be more responsive but still filter jitter.
     deadband_x: 50

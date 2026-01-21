@@ -11,8 +11,10 @@
 
   <depend>rclcpp</depend>
   <depend>sensor_msgs</depend>
-  <depend>recomo_controller</depend>
+  <depend>geometry_msgs</depend>
+  <depend>recomo_msgs</depend>
   <depend>jc2804_gimbal_driver</depend>
+  <depend>ronin_rs4_driver</depend>
   <depend>std_msgs</depend>
   <depend>nlohmann-json3-dev</depend> 
 

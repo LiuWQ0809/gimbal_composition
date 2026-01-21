@@ -8,8 +8,10 @@ endif()
 find_package(ament_cmake REQUIRED)
 find_package(rclcpp REQUIRED)
 find_package(sensor_msgs REQUIRED)
-find_package(recomo_controller REQUIRED)
+find_package(geometry_msgs REQUIRED)
+find_package(recomo_msgs REQUIRED)
 find_package(jc2804_gimbal_driver REQUIRED)
+find_package(ronin_rs4_driver REQUIRED)
 find_package(std_msgs REQUIRED)
 
 add_executable(tracking_node src/gimbal_tracking_node.cpp)
@@ -21,9 +23,11 @@ target_compile_features(tracking_node PUBLIC c_std_17)
 ament_target_dependencies(tracking_node
   rclcpp
   sensor_msgs
+  geometry_msgs
   std_msgs
-  recomo_controller
+  recomo_msgs
   jc2804_gimbal_driver
+  ronin_rs4_driver
 )
 
 install(TARGETS tracking_node

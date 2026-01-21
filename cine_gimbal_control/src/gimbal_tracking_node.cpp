@@ -1,17 +1,47 @@
 #include <rclcpp/rclcpp.hpp>
 #include <sensor_msgs/msg/region_of_interest.hpp>
 #include <std_msgs/msg/string.hpp>
-#include <recomo_controller/msg/tracked_object2_d.hpp>
+#include <recomo_msgs/msg/tracking.hpp>
 #include <jc2804_gimbal_driver/msg/gimbal_command.hpp>
 #include <jc2804_gimbal_driver/msg/gimbal_state.hpp>
+#include <ronin_rs4_driver/msg/ronin_rs4_control.hpp>
+#include <ronin_rs4_driver/msg/ronin_rs4_status.hpp>
 
 #include <nlohmann/json.hpp>
+#include <array>
 #include <algorithm> // for clamp
 #include <chrono>
+#include <cctype>
 #include <cmath>
+#include <string>
+#include <vector>
 
 using namespace std::chrono_literals;
 using json = nlohmann::json;
+
+namespace {
+
+constexpr double kPi = 3.14159265358979323846;
+
+double DegFromRad(double rad) {
+  return rad * 180.0 / kPi;
+}
+
+double RadFromDeg(double deg) {
+  return deg * kPi / 180.0;
+}
+
+}  // namespace
+
+enum class GimbalDriver {
+  kJc2804,
+  kRs4,
+};
+
+enum class Rs4ControlMode {
+  kAttitude,
+  kJoint,
+};
 
 class GimbalTrackingNode : public rclcpp::Node
 {
@@ -32,6 +62,31 @@ public:
     this->declare_parameter("confidence_threshold", 0.3);
     this->declare_parameter("cmd_rate_hz", 20.0);
     this->declare_parameter("default_focal_length", 1000.0); // Fallback pixel focal length
+    std::string driver = this->declare_parameter("gimbal_driver", "jc2804");
+    std::string rs4_control_mode = this->declare_parameter("rs4_control_mode", "attitude");
+    topic_gimbal_state_ =
+      this->declare_parameter<std::string>("topics.gimbal_state", "/gimbal/state");
+    topic_gimbal_command_ =
+      this->declare_parameter<std::string>("topics.gimbal_command", "/gimbal/command");
+    topic_rs4_state_ = this->declare_parameter<std::string>(
+      "topics.rs4_status", "/ronin_rs4_driver/status/state");
+    topic_rs4_command_ = this->declare_parameter<std::string>(
+      "topics.rs4_command", "/ronin_rs4_driver/cmd/control");
+    rs4_axis_map_ = ParseAxisMap(
+      this->declare_parameter<std::vector<int64_t>>(
+        "rs4_axis_map_from_gimbal", std::vector<int64_t>{2, 0, 1}),
+      {2, 0, 1});
+    rs4_axis_map_inv_ = InvertAxisMap(rs4_axis_map_);
+    rs4_axis_sign_ = ParseAxisVector(
+      this->declare_parameter<std::vector<double>>(
+        "rs4_axis_sign", std::vector<double>{1.0, 1.0, 1.0}),
+      {1.0, 1.0, 1.0});
+    rs4_axis_offset_rad_ = ParseAxisVector(
+      this->declare_parameter<std::vector<double>>(
+        "rs4_axis_zero_offset_rad", std::vector<double>{0.0, 0.0, 0.0}),
+      {0.0, 0.0, 0.0});
+    driver_ = ParseDriver(driver);
+    rs4_control_mode_ = ParseRs4ControlMode(rs4_control_mode);
     
     // Safety & Smoothness Params
     this->declare_parameter("max_velocity_rpm", 5.0); // Limit max speed (lower than driver max 10)
@@ -40,7 +95,7 @@ public:
     this->declare_parameter("limit_yaw_rad", 1.57);   // Limit yaw to +/- 90 degrees
     
     // Subscribers
-    tracking_sub_ = this->create_subscription<recomo_controller::msg::TrackedObject2D>(
+    tracking_sub_ = this->create_subscription<recomo_msgs::msg::Tracking>(
       "/recomo/subject_tracking", 10,
       std::bind(&GimbalTrackingNode::trackingCallback, this, std::placeholders::_1));
 
@@ -48,13 +103,19 @@ public:
       "/recomo/rgb/telemetry", 10,
       std::bind(&GimbalTrackingNode::telemetryCallback, this, std::placeholders::_1));
 
-    gimbal_state_sub_ = this->create_subscription<jc2804_gimbal_driver::msg::GimbalState>(
-      "/gimbal/state", 10,
-      std::bind(&GimbalTrackingNode::gimbalStateCallback, this, std::placeholders::_1));
-
-    // Publisher
-    gimbal_cmd_pub_ = this->create_publisher<jc2804_gimbal_driver::msg::GimbalCommand>(
-      "/gimbal/command", 10);
+    if (driver_ == GimbalDriver::kJc2804) {
+      gimbal_state_sub_ = this->create_subscription<jc2804_gimbal_driver::msg::GimbalState>(
+        topic_gimbal_state_, 10,
+        std::bind(&GimbalTrackingNode::gimbalStateCallback, this, std::placeholders::_1));
+      gimbal_cmd_pub_ = this->create_publisher<jc2804_gimbal_driver::msg::GimbalCommand>(
+        topic_gimbal_command_, 10);
+    } else {
+      rs4_state_sub_ = this->create_subscription<ronin_rs4_driver::msg::RoninRs4Status>(
+        topic_rs4_state_, 10,
+        std::bind(&GimbalTrackingNode::rs4StateCallback, this, std::placeholders::_1));
+      rs4_cmd_pub_ = this->create_publisher<ronin_rs4_driver::msg::RoninRs4Control>(
+        topic_rs4_command_, 10);
+    }
 
     // Timer for control loop
     double rate = this->get_parameter("cmd_rate_hz").as_double();
@@ -62,7 +123,10 @@ public:
       std::chrono::duration<double>(1.0 / rate),
       std::bind(&GimbalTrackingNode::controlLoop, this));
 
-    RCLCPP_INFO(this->get_logger(), "Gimbal Tracking Node Started.");
+    const char *driver_name = driver_ == GimbalDriver::kRs4 ? "ronin_rs4" : "jc2804";
+    const char *rs4_mode = rs4_control_mode_ == Rs4ControlMode::kAttitude ? "attitude" : "joint";
+    RCLCPP_INFO(this->get_logger(),
+      "Gimbal Tracking Node Started (driver=%s, rs4_mode=%s).", driver_name, rs4_mode);
   }
 
 private:
@@ -102,7 +166,7 @@ private:
     }
   }
 
-  void trackingCallback(const recomo_controller::msg::TrackedObject2D::SharedPtr msg)
+  void trackingCallback(const recomo_msgs::msg::Tracking::SharedPtr msg)
   {
     last_tracking_msg_ = msg;
     last_tracking_time_ = this->now();
@@ -110,33 +174,79 @@ private:
 
   void gimbalStateCallback(const jc2804_gimbal_driver::msg::GimbalState::SharedPtr msg)
   {
-    last_gimbal_state_ = msg;
-    current_yaw_ = msg->yaw_position_rad;   // Assuming field name based on pattern
+    current_roll_ = msg->roll_position_rad;
     current_pitch_ = msg->pitch_position_rad;
-    // Reading field names from msg file:
-    // float64 roll_position_rad
-    // float64 pitch_position_rad
-    // float64 yaw_position_rad (implied, will verify compile)
+    current_yaw_ = msg->yaw_position_rad;
+    have_gimbal_state_ = true;
+  }
+
+  void rs4StateCallback(const ronin_rs4_driver::msg::RoninRs4Status::SharedPtr msg)
+  {
+    geometry_msgs::msg::Vector3 source = msg->joint_deg;
+    if (rs4_control_mode_ == Rs4ControlMode::kAttitude) {
+      if ((msg->valid_mask & ronin_rs4_driver::msg::RoninRs4Status::VALID_ATTITUDE) == 0) {
+        RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 2000, 
+            "Received RS4 state but VALID_ATTITUDE bit is missing. Mask: %u", msg->valid_mask);
+        return;
+      }
+      source = msg->attitude_deg;
+    } else {
+      if ((msg->valid_mask & ronin_rs4_driver::msg::RoninRs4Status::VALID_JOINT) == 0) {
+        RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 2000, 
+            "Received RS4 state but VALID_JOINT bit is missing. Mask: %u", msg->valid_mask);
+        return;
+      }
+    }
+
+    if (!rs4_connected_once_) {
+        RCLCPP_INFO(this->get_logger(), "RS4 State Received and Valid. Mask: %u", msg->valid_mask);
+        rs4_connected_once_ = true;
+    }
+
+    std::array<double, 3> rs4_rad{
+      RadFromDeg(source.x),
+      RadFromDeg(source.y),
+      RadFromDeg(source.z)
+    };
+    for (size_t i = 0; i < 3; ++i) {
+      rs4_rad[i] = rs4_axis_sign_[i] * (rs4_rad[i] - rs4_axis_offset_rad_[i]);
+    }
+
+    std::array<double, 3> gimbal_rad{};
+    for (size_t i = 0; i < 3; ++i) {
+      gimbal_rad[i] = rs4_rad[static_cast<size_t>(rs4_axis_map_inv_[i])];
+    }
+
+    current_roll_ = gimbal_rad[0];
+    current_pitch_ = gimbal_rad[1];
+    current_yaw_ = gimbal_rad[2];
+    have_gimbal_state_ = true;
   }
 
   void controlLoop()
   {
-    if (!last_gimbal_state_) {
+    if (!have_gimbal_state_) {
       RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 5000, "Waiting for gimbal state...");
       return;
     }
 
     if (!last_tracking_msg_) {
+      RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 5000, "Waiting for tracking message...");
       return; 
     }
 
     // Check freshness of tracking
     if ((this->now() - last_tracking_time_).seconds() > 0.5) {
+      RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 5000, "Tracking message stale (>0.5s)");
       // Tracking lost or stale
       return;
     }
 
     if (last_tracking_msg_->confidence < this->get_parameter("confidence_threshold").as_double()) {
+      RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 5000, 
+        "Tracking confidence low: %.2f < %.2f", 
+        last_tracking_msg_->confidence, 
+        this->get_parameter("confidence_threshold").as_double());
       return;
     }
 
@@ -241,8 +351,14 @@ private:
     delta_pitch = std::clamp(delta_pitch, -max_step, max_step);
 
     // Integrate Position
-    double target_yaw = last_commanded_yaw_ + delta_yaw;
-    double target_pitch = last_commanded_pitch_ + delta_pitch;
+    double base_yaw = last_commanded_yaw_;
+    double base_pitch = last_commanded_pitch_;
+    if (driver_ == GimbalDriver::kRs4 && rs4_control_mode_ == Rs4ControlMode::kAttitude) {
+      base_yaw = current_yaw_;
+      base_pitch = current_pitch_;
+    }
+    double target_yaw = base_yaw + delta_yaw;
+    double target_pitch = base_pitch + delta_pitch;
     
     // Safety Limits (Absolute Clamp)
     double limit_yaw = this->get_parameter("limit_yaw_rad").as_double();
@@ -256,18 +372,36 @@ private:
     last_commanded_pitch_ = target_pitch;
 
     // Publish Command
-    jc2804_gimbal_driver::msg::GimbalCommand cmd;
-    cmd.roll_rad = 0.0;
-    cmd.pitch_rad = target_pitch;
-    cmd.yaw_rad = target_yaw;
-    
-    double max_v = this->get_parameter("max_velocity_rpm").as_double();
-    
-    cmd.roll_velocity_rpm = max_v;
-    cmd.pitch_velocity_rpm = max_v;
-    cmd.yaw_velocity_rpm = max_v;
+    if (driver_ == GimbalDriver::kJc2804) {
+      jc2804_gimbal_driver::msg::GimbalCommand cmd;
+      cmd.roll_rad = 0.0;
+      cmd.pitch_rad = target_pitch;
+      cmd.yaw_rad = target_yaw;
+      
+      double max_v = this->get_parameter("max_velocity_rpm").as_double();
+      
+      cmd.roll_velocity_rpm = max_v;
+      cmd.pitch_velocity_rpm = max_v;
+      cmd.yaw_velocity_rpm = max_v;
 
-    gimbal_cmd_pub_->publish(cmd);
+      gimbal_cmd_pub_->publish(cmd);
+    } else {
+      ronin_rs4_driver::msg::RoninRs4Control cmd;
+      cmd.command = ronin_rs4_driver::msg::RoninRs4Control::CMD_POSITION;
+
+      std::array<double, 3> gimbal_rad{0.0, target_pitch, target_yaw};
+      std::array<double, 3> rs4_rad{};
+      for (size_t i = 0; i < 3; ++i) {
+        rs4_rad[i] = gimbal_rad[static_cast<size_t>(rs4_axis_map_[i])];
+        rs4_rad[i] = rs4_axis_sign_[i] * rs4_rad[i] + rs4_axis_offset_rad_[i];
+      }
+
+      cmd.position_deg.x = DegFromRad(rs4_rad[0]);
+      cmd.position_deg.y = DegFromRad(rs4_rad[1]);
+      cmd.position_deg.z = DegFromRad(rs4_rad[2]);
+
+      rs4_cmd_pub_->publish(cmd);
+    }
 
     RCLCPP_INFO(this->get_logger(), 
       "BBOX: [%u, %u, %u, %u] | Err(%d, %d)\n"
@@ -279,23 +413,108 @@ private:
       target_yaw, target_pitch);
   }
 
+  GimbalDriver ParseDriver(const std::string &driver) {
+    std::string normalized = driver;
+    std::transform(normalized.begin(), normalized.end(), normalized.begin(),
+      [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    if (normalized == "rs4" || normalized == "ronin_rs4" || normalized == "dji_rs4") {
+      return GimbalDriver::kRs4;
+    }
+    if (normalized != "jc2804") {
+      RCLCPP_WARN(this->get_logger(),
+        "Unknown gimbal_driver '%s', defaulting to jc2804.", driver.c_str());
+    }
+    return GimbalDriver::kJc2804;
+  }
+
+  Rs4ControlMode ParseRs4ControlMode(const std::string &mode) {
+    std::string normalized = mode;
+    std::transform(normalized.begin(), normalized.end(), normalized.begin(),
+      [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    if (normalized == "attitude" || normalized == "world") {
+      return Rs4ControlMode::kAttitude;
+    }
+    if (normalized == "joint") {
+      return Rs4ControlMode::kJoint;
+    }
+    RCLCPP_WARN(this->get_logger(),
+      "Unknown rs4_control_mode '%s', defaulting to attitude.", mode.c_str());
+    return Rs4ControlMode::kAttitude;
+  }
+
+  std::array<int, 3> ParseAxisMap(
+    const std::vector<int64_t> &map_param, const std::array<int, 3> &fallback) {
+    if (map_param.size() == 3) {
+      std::array<int, 3> map{};
+      for (size_t i = 0; i < 3; ++i) {
+        map[i] = static_cast<int>(map_param[i]);
+      }
+      if (IsValidAxisMap(map)) {
+        return map;
+      }
+      RCLCPP_WARN(this->get_logger(),
+        "Invalid rs4_axis_map_from_gimbal; using default.");
+    } else {
+      RCLCPP_WARN(this->get_logger(),
+        "rs4_axis_map_from_gimbal should have 3 entries; using default.");
+    }
+    return fallback;
+  }
+
+  std::array<int, 3> InvertAxisMap(const std::array<int, 3> &map) const {
+    std::array<int, 3> inv{};
+    for (size_t i = 0; i < 3; ++i) {
+      inv[static_cast<size_t>(map[i])] = static_cast<int>(i);
+    }
+    return inv;
+  }
+
+  bool IsValidAxisMap(const std::array<int, 3> &map) const {
+    std::array<int, 3> tmp = map;
+    std::sort(tmp.begin(), tmp.end());
+    return tmp[0] == 0 && tmp[1] == 1 && tmp[2] == 2;
+  }
+
+  std::array<double, 3> ParseAxisVector(
+    const std::vector<double> &vec, const std::array<double, 3> &fallback) {
+    if (vec.size() != 3) {
+      RCLCPP_WARN(this->get_logger(), "Axis vector size != 3; using defaults.");
+      return fallback;
+    }
+    return {vec[0], vec[1], vec[2]};
+  }
+
   // Member variables
   bool last_commanded_valid_ = false;
   double last_commanded_yaw_ = 0.0;
   double last_commanded_pitch_ = 0.0;
+  GimbalDriver driver_{GimbalDriver::kJc2804};
+  Rs4ControlMode rs4_control_mode_{Rs4ControlMode::kAttitude};
+  std::string topic_gimbal_state_;
+  std::string topic_gimbal_command_;
+  std::string topic_rs4_state_;
+  std::string topic_rs4_command_;
+  std::array<int, 3> rs4_axis_map_{2, 0, 1};
+  std::array<int, 3> rs4_axis_map_inv_{0, 1, 2};
+  std::array<double, 3> rs4_axis_sign_{1.0, 1.0, 1.0};
+  std::array<double, 3> rs4_axis_offset_rad_{0.0, 0.0, 0.0};
 
-  rclcpp::Subscription<recomo_controller::msg::TrackedObject2D>::SharedPtr tracking_sub_;
+  rclcpp::Subscription<recomo_msgs::msg::Tracking>::SharedPtr tracking_sub_;
   rclcpp::Subscription<std_msgs::msg::String>::SharedPtr telemetry_sub_;
   rclcpp::Subscription<jc2804_gimbal_driver::msg::GimbalState>::SharedPtr gimbal_state_sub_;
   rclcpp::Publisher<jc2804_gimbal_driver::msg::GimbalCommand>::SharedPtr gimbal_cmd_pub_;
+  rclcpp::Subscription<ronin_rs4_driver::msg::RoninRs4Status>::SharedPtr rs4_state_sub_;
+  rclcpp::Publisher<ronin_rs4_driver::msg::RoninRs4Control>::SharedPtr rs4_cmd_pub_;
   rclcpp::TimerBase::SharedPtr timer_;
 
-  recomo_controller::msg::TrackedObject2D::SharedPtr last_tracking_msg_;
+  recomo_msgs::msg::Tracking::SharedPtr last_tracking_msg_;
   rclcpp::Time last_tracking_time_;
   
-  jc2804_gimbal_driver::msg::GimbalState::SharedPtr last_gimbal_state_;
-  double current_yaw_ = 0.0;
+  bool have_gimbal_state_ = false;
+  bool rs4_connected_once_ = false;
+  double current_roll_ = 0.0;
   double current_pitch_ = 0.0;
+  double current_yaw_ = 0.0;
   
   // Dynamic parameters from telemetry
   int current_width_ = 0;

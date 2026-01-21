@@ -15,6 +15,7 @@
 - ROS 2 Humble
 - `recomo_controller`（消息：`TrackedObject2D`）
 - `jc2804_gimbal_driver`（消息：`GimbalCommand`、`GimbalState`）
+- `ronin_rs4_driver`（DJI RS4，可选；直接模式时使用）
 - `nlohmann-json3-dev`（解析遥测 JSON）
 
 > 注意：脚本默认尝试 `source /home/nvidia/yanbo/gikWBC9DOF/scripts/orin/recomo_env.bash`，若不存在会回退到 `/opt/ros/humble` 及本地工作空间。若你的目录不同，请修改脚本中的 `WORKSPACE_DIR`。
@@ -43,6 +44,12 @@ source install/setup.bash
 ros2 launch cine_gimbal_control tracking.launch.py
 ```
 
+RS4 direct mode (attitude/world pointing):
+
+```bash
+ros2 launch cine_gimbal_control tracking.launch.py gimbal_driver:=rs4
+```
+
 ## 话题与数据流
 
 - 订阅：
@@ -52,8 +59,13 @@ ros2 launch cine_gimbal_control tracking.launch.py
     - 可选字段：`width`、`height`、`fx`（焦距像素）
   - `/gimbal/state`（`jc2804_gimbal_driver/msg/GimbalState`）
     - 使用 `pitch_position_rad`、`yaw_position_rad`
+  - `/ronin_rs4_driver/status/state`（`ronin_rs4_driver/msg/RoninRs4Status`，当 `gimbal_driver=rs4`）
 - 发布：
   - `/gimbal/command`（`jc2804_gimbal_driver/msg/GimbalCommand`）
+  - `/ronin_rs4_driver/cmd/control`（`ronin_rs4_driver/msg/RoninRs4Control`，当 `gimbal_driver=rs4`）
+
+> RS4 若需保留 `/gimbal/*` 话题，可启动 `ronin_rs4_driver` 的 compat 节点，并保持 `gimbal_driver=jc2804`。
+> RS4 直接模式默认使用姿态控制（`rs4_control_mode=attitude`），发送的是相机朝向而非电机角度。
 
 ## 参数说明（`cine_gimbal_control/config/params.yaml`）
 
@@ -61,6 +73,15 @@ ros2 launch cine_gimbal_control tracking.launch.py
 | --- | --- | --- |
 | `image_width` | 1920 | 图像宽度 |
 | `image_height` | 1080 | 图像高度 |
+| `gimbal_driver` | `jc2804` | `jc2804` 或 `rs4` |
+| `rs4_control_mode` | `attitude` | `attitude`（世界姿态）或 `joint` |
+| `topics.gimbal_state` | `/gimbal/state` | jc2804 状态话题 |
+| `topics.gimbal_command` | `/gimbal/command` | jc2804 指令话题 |
+| `topics.rs4_status` | `/ronin_rs4_driver/status/state` | RS4 状态话题 |
+| `topics.rs4_command` | `/ronin_rs4_driver/cmd/control` | RS4 指令话题 |
+| `rs4_axis_map_from_gimbal` | `[2,0,1]` | gimbal[roll,pitch,yaw] -> rs4[yaw,roll,pitch] |
+| `rs4_axis_sign` | `[1,1,1]` | RS4 轴向符号 |
+| `rs4_axis_zero_offset_rad` | `[0,0,0]` | RS4 零位偏移 |
 | `kp_yaw` | 0.000005 | Yaw 比例增益（rad/pixel） |
 | `ki_yaw` | 0.0000001 | Yaw 积分增益 |
 | `kd_yaw` | 0.0 | Yaw 微分增益 |

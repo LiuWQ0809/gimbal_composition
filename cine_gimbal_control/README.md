@@ -1,6 +1,8 @@
 # Cine Gimbal Control
 
 这是一个用于控制云台跟踪相机的 ROS 2 节点。它接收 `/recomo/subject_tracking` 中的 2D 框，并控制云台（发布 `/gimbal/command`）将目标保持在图像中心。
+RS4 direct mode publishes to `/ronin_rs4_driver/*` when `gimbal_driver=rs4` (or keep `/gimbal/*` via the compat bridge).
+RS4 direct mode defaults to attitude control (`rs4_control_mode=attitude`), so commands are camera pointing in world coordinates.
 
 ## 硬件与坐标系说明
 
@@ -19,6 +21,10 @@
     - 常见光学坐标系中，向上看通常对应 Pitch 减小 (或负方向)。代码默认使用 `- kp_pitch * error`。
   - **参数调整**: 如果发现跟踪方向相反，请在 `params.yaml` 中将对应的 `kp` 值设为负数。
 
+For recomoProto1 (DJI RS4), verify axis mapping/offsets against
+`/home/nvidia/yanbo/gikWBC9DOF/models/recomoProto1/recomoProto1.urdf` and update
+`rs4_axis_*` parameters as needed.
+
 ## 像素到角度的换算
 
 控制核心是将像素误差乘以系数 $K_p$ 转换为目标弧度。
@@ -30,6 +36,7 @@
 - ROS 2 Humble
 - `recomo_controller` (消息定义: `TrackedObject2D`)
 - `jc2804_gimbal_driver` (消息定义: `GimbalCommand`, `GimbalState`)
+- `ronin_rs4_driver` (DJI RS4 direct mode)
 
 ## 编译
 
@@ -59,6 +66,12 @@ source install/setup.bash
 ros2 launch cine_gimbal_control tracking.launch.py
 ```
 
+RS4 direct mode:
+
+```bash
+ros2 launch cine_gimbal_control tracking.launch.py gimbal_driver:=rs4
+```
+
 或者直接运行节点：
 
 ```bash
@@ -71,6 +84,15 @@ ros2 run cine_gimbal_control tracking_node
 |---|---|---|---|
 | `image_width` | int | 1920 | 图像宽度 (pixel) |
 | `image_height` | int | 1080 | 图像高度 (pixel) |
+| `gimbal_driver` | string | `jc2804` | `jc2804` or `rs4` |
+| `rs4_control_mode` | string | `attitude` | `attitude` (world pointing) or `joint` |
+| `topics.gimbal_state` | string | `/gimbal/state` | jc2804 state topic |
+| `topics.gimbal_command` | string | `/gimbal/command` | jc2804 command topic |
+| `topics.rs4_status` | string | `/ronin_rs4_driver/status/state` | RS4 status topic |
+| `topics.rs4_command` | string | `/ronin_rs4_driver/cmd/control` | RS4 control topic |
+| `rs4_axis_map_from_gimbal` | int[3] | `[2,0,1]` | gimbal[roll,pitch,yaw] -> rs4[yaw,roll,pitch] |
+| `rs4_axis_sign` | double[3] | `[1,1,1]` | RS4 axis sign |
+| `rs4_axis_zero_offset_rad` | double[3] | `[0,0,0]` | RS4 axis offset |
 | `kp_yaw` | double | 0.0005 | Yaw 轴比例增益 (rad/pixel) |
 | `kp_pitch` | double | 0.0005 | Pitch 轴比例增益 (rad/pixel) |
 | `deadband_x` | int | 20 | X 轴死区 (pixel)，误差小于此值不调整 |
