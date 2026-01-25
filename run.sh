@@ -33,8 +33,11 @@ else
     [ -f "/home/nvidia/recomoArm_ws/install/setup.bash" ] && source /home/nvidia/recomoArm_ws/install/setup.bash
     [ -f "/home/nvidia/jay/gimbal-v1-rs4/ros2_ws/install/setup.bash" ] && source /home/nvidia/jay/gimbal-v1-rs4/ros2_ws/install/setup.bash
     # Verify/Add nanotrack_cpp workspace for recomo_msgs
-    [ -f "/home/nvidia/workspaces/perception/nanotrack_cpp/install/setup.bash" ] && source /home/nvidia/workspaces/perception/nanotrack_cpp/install/setup.bash
+    # [ -f "/home/nvidia/workspaces/perception/nanotrack_cpp/install/setup.bash" ] && source /home/nvidia/workspaces/perception/nanotrack_cpp/install/setup.bash
 fi
+
+# Verify/Add nanotrack_cpp workspace for recomo_msgs (Always source this)
+[ -f "/home/nvidia/workspaces/perception/nanotrack_cpp/install/setup.bash" ] && source /home/nvidia/workspaces/perception/nanotrack_cpp/install/setup.bash
 
 # Optional RS4 overlay (ronin_rs4_driver).
 RS4_WS_CANDIDATES=(

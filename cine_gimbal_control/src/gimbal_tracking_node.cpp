@@ -250,6 +250,12 @@ private:
       return;
     }
 
+    if (last_tracking_msg_->state == "lost") {
+      RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 5000, 
+        "Tracking state is 'lost'. Gimbal holding position.");
+      return;
+    }
+
     // Determine current geometry usage
     int img_w = (current_width_ > 0) ? current_width_ : this->get_parameter("image_width").as_int();
     int img_h = (current_height_ > 0) ? current_height_ : this->get_parameter("image_height").as_int();
